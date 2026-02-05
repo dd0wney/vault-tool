@@ -1,0 +1,336 @@
+#!/bin/bash
+set -euo pipefail
+
+# Configuration file and defaults
+CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/vault-tool/config"
+DEFAULT_VAULT_DIR="$HOME/.vaults"
+DEFAULT_MOUNT_BASE="/mnt"
+DEFAULT_OP_VAULT="Work"
+
+# Load config file if it exists
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE"
+    fi
+}
+
+# Apply config: env var > config file > default
+load_config
+VAULT_DIR="${VAULT_DIR:-${CONFIG_VAULT_DIR:-$DEFAULT_VAULT_DIR}}"
+MOUNT_BASE="${MOUNT_BASE:-${CONFIG_MOUNT_BASE:-$DEFAULT_MOUNT_BASE}}"
+OP_VAULT="${OP_VAULT:-${CONFIG_OP_VAULT:-$DEFAULT_OP_VAULT}}"
+
+usage() {
+    cat <<EOF
+Usage: vault <command> <client>
+
+Commands:
+    new     Create a new encrypted vault (requires Yubikey)
+    open    Open and mount a client vault (requires Yubikey)
+    close   Unmount and close a client vault
+    status  Check if a vault is open
+    list    List available vaults
+    config  Show or set configuration
+
+Examples:
+    vault new eql           # create 500MB vault (default)
+    vault new eql 1G        # create 1GB vault
+    vault open eql
+    vault close eql
+    vault status eql
+    vault list
+    vault config                        # show current config
+    vault config set VAULT_DIR ~/vaults # set vault directory
+EOF
+    exit 1
+}
+
+require_root() {
+    if [[ $EUID -ne 0 ]]; then
+        echo "Error: This command requires sudo" >&2
+        exit 1
+    fi
+}
+
+validate_client_name() {
+    local client="$1"
+    if ! [[ "$client" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        echo "Error: Invalid client name. Use only alphanumeric, underscore, hyphen." >&2
+        exit 1
+    fi
+}
+
+get_paths() {
+    local client="$1"
+    validate_client_name "$client"
+    CLIENT_LOWER="${client,,}"
+    IMG_PATH="${VAULT_DIR}/${CLIENT_LOWER}.img"
+    MAPPER_NAME="${CLIENT_LOWER}-vault"
+    MOUNT_POINT="${MOUNT_BASE}/${CLIENT_LOWER}"
+}
+
+vault_open() {
+    local client="$1"
+    get_paths "$client"
+
+    if [[ ! -f "$IMG_PATH" ]]; then
+        echo "Error: Vault not found: $IMG_PATH" >&2
+        exit 1
+    fi
+
+    if [[ -e "/dev/mapper/${MAPPER_NAME}" ]]; then
+        echo "Vault '$CLIENT_LOWER' is already open"
+        exit 0
+    fi
+
+    echo "Opening vault: $CLIENT_LOWER"
+    sudo cryptsetup open --token-only "$IMG_PATH" "$MAPPER_NAME"
+
+    sudo mkdir -p "$MOUNT_POINT"
+    sudo mount "/dev/mapper/${MAPPER_NAME}" "$MOUNT_POINT"
+
+    echo "Mounted at: $MOUNT_POINT"
+}
+
+vault_close() {
+    local client="$1"
+    get_paths "$client"
+
+    if [[ ! -e "/dev/mapper/${MAPPER_NAME}" ]]; then
+        echo "Vault '$CLIENT_LOWER' is not open"
+        exit 0
+    fi
+
+    echo "Closing vault: $CLIENT_LOWER"
+
+    if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+        sudo umount "$MOUNT_POINT"
+    fi
+
+    sudo cryptsetup close "$MAPPER_NAME"
+    echo "Vault closed"
+}
+
+vault_status() {
+    local client="$1"
+    get_paths "$client"
+
+    if [[ -e "/dev/mapper/${MAPPER_NAME}" ]]; then
+        echo "Vault '$CLIENT_LOWER' is OPEN"
+        if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+            echo "Mounted at: $MOUNT_POINT"
+        else
+            echo "Warning: Mapper exists but not mounted"
+        fi
+    else
+        echo "Vault '$CLIENT_LOWER' is CLOSED"
+    fi
+}
+
+vault_list() {
+    echo "Available vaults in $VAULT_DIR:"
+    if [[ -d "$VAULT_DIR" ]]; then
+        for img in "$VAULT_DIR"/*.img; do
+            [[ -e "$img" ]] || continue
+            name=$(basename "$img" .img)
+            if [[ -e "/dev/mapper/${name}-vault" ]]; then
+                echo "  $name (open)"
+            else
+                echo "  $name"
+            fi
+        done
+    else
+        echo "  (vault directory does not exist)"
+    fi
+}
+
+vault_config() {
+    local action="${1:-show}"
+
+    case "$action" in
+        show)
+            echo "Configuration (file: $CONFIG_FILE)"
+            echo ""
+            echo "  VAULT_DIR:  $VAULT_DIR"
+            echo "  MOUNT_BASE: $MOUNT_BASE"
+            echo "  OP_VAULT:   $OP_VAULT"
+            echo ""
+            if [[ -f "$CONFIG_FILE" ]]; then
+                echo "Config file contents:"
+                cat "$CONFIG_FILE"
+            else
+                echo "(no config file - using defaults)"
+            fi
+            ;;
+        set)
+            local key="${2:-}"
+            local value="${3:-}"
+
+            if [[ -z "$key" || -z "$value" ]]; then
+                echo "Usage: vault config set <KEY> <VALUE>" >&2
+                echo "Keys: VAULT_DIR, MOUNT_BASE, OP_VAULT" >&2
+                exit 1
+            fi
+
+            # Validate key
+            case "$key" in
+                VAULT_DIR|MOUNT_BASE|OP_VAULT) ;;
+                *)
+                    echo "Error: Unknown config key: $key" >&2
+                    echo "Valid keys: VAULT_DIR, MOUNT_BASE, OP_VAULT" >&2
+                    exit 1
+                    ;;
+            esac
+
+            # Expand ~ in value
+            value="${value/#\~/$HOME}"
+
+            # Create config directory if needed
+            mkdir -p "$(dirname "$CONFIG_FILE")"
+
+            # Update or add the key in config file
+            local config_key="CONFIG_$key"
+            if [[ -f "$CONFIG_FILE" ]] && grep -q "^$config_key=" "$CONFIG_FILE"; then
+                # Update existing key
+                sed -i "s|^$config_key=.*|$config_key=\"$value\"|" "$CONFIG_FILE"
+            else
+                # Add new key
+                echo "$config_key=\"$value\"" >> "$CONFIG_FILE"
+            fi
+
+            echo "Set $key=$value"
+            ;;
+        *)
+            echo "Usage: vault config [show|set <KEY> <VALUE>]" >&2
+            exit 1
+            ;;
+    esac
+}
+
+vault_new() {
+    local client="$1"
+    local size="${2:-500M}"
+    get_paths "$client"
+
+    # Validate size format
+    if ! [[ "$size" =~ ^[0-9]+[MG]$ ]]; then
+        echo "Error: Invalid size format. Use e.g., 500M or 1G" >&2
+        exit 1
+    fi
+
+    # Check for 1Password CLI and auth state
+    if ! command -v op &>/dev/null; then
+        echo "Error: 1Password CLI (op) not found" >&2
+        exit 1
+    fi
+    if ! op vault list &>/dev/null; then
+        echo "Error: Not signed in to 1Password. Run 'op signin' first." >&2
+        exit 1
+    fi
+
+    # Parse size for dd (convert to MB) with bounds check
+    local count
+    if [[ "$size" =~ ^([0-9]+)G$ ]]; then
+        count=$(( ${BASH_REMATCH[1]} * 1024 ))
+    else
+        count="${size%M}"
+    fi
+    if (( count < 10 || count > 102400 )); then
+        echo "Error: Size must be between 10M and 100G" >&2
+        exit 1
+    fi
+
+    echo "Creating vault: $CLIENT_LOWER ($size)"
+    mkdir -p "$VAULT_DIR"
+
+    # Atomic file creation (prevents TOCTOU race)
+    if ! ( set -C; : > "$IMG_PATH" ) 2>/dev/null; then
+        echo "Error: Vault '$CLIENT_LOWER' already exists" >&2
+        exit 1
+    fi
+
+    # Cleanup trap for failed operations
+    local op_item_created=false
+    cleanup() {
+        echo "  Cleaning up after failure..." >&2
+        unset passphrase 2>/dev/null || true
+        [[ -e "/dev/mapper/${MAPPER_NAME}" ]] && sudo cryptsetup close "$MAPPER_NAME" 2>/dev/null || true
+        [[ -f "$IMG_PATH" ]] && rm -f "$IMG_PATH"
+        [[ "$op_item_created" == "true" ]] && op item delete "${CLIENT_LOWER}-vault-recovery" --vault="$OP_VAULT" 2>/dev/null || true
+    }
+    trap cleanup ERR
+
+    # Generate passphrase in 1Password (never touches command args)
+    echo "  Creating recovery passphrase in 1Password (vault: $OP_VAULT)..."
+    if ! op item create \
+        --category=password \
+        --title="${CLIENT_LOWER}-vault-recovery" \
+        --vault="$OP_VAULT" \
+        --generate-password='32,letters,digits,symbols' \
+        "notesPlain=LUKS recovery passphrase for ${CLIENT_LOWER}.img" \
+        >/dev/null; then
+        echo "Error: Failed to create passphrase in 1Password" >&2
+        exit 1
+    fi
+    op_item_created=true
+
+    # Read passphrase back securely
+    echo "  Retrieving passphrase..."
+    local passphrase
+    passphrase=$(op read "op://${OP_VAULT}/${CLIENT_LOWER}-vault-recovery/password")
+
+    echo "  Allocating $size..."
+    dd if=/dev/zero of="$IMG_PATH" bs=1M count="$count" status=progress
+
+    echo "  Formatting LUKS container..."
+    sudo cryptsetup luksFormat "$IMG_PATH" --key-file=- <<< "$passphrase"
+
+    echo "  Opening container to create filesystem..."
+    sudo cryptsetup open "$IMG_PATH" "$MAPPER_NAME" --key-file=- <<< "$passphrase"
+
+    echo "  Creating ext4 filesystem..."
+    sudo mkfs.ext4 -q "/dev/mapper/${MAPPER_NAME}"
+
+    echo "  Closing container..."
+    sudo cryptsetup close "$MAPPER_NAME"
+
+    echo "  Enrolling Yubikey (tap when prompted)..."
+    sudo systemd-cryptenroll "$IMG_PATH" --fido2-device=auto --unlock-key-file=- <<< "$passphrase"
+
+    # Clear passphrase from memory
+    unset passphrase
+    trap - ERR
+
+    echo ""
+    echo "Vault '$CLIENT_LOWER' created successfully"
+    echo "Recovery passphrase stored in 1Password: ${CLIENT_LOWER}-vault-recovery"
+    echo "Use 'vault open $CLIENT_LOWER' to mount it"
+}
+
+# Main
+[[ $# -lt 1 ]] && usage
+
+cmd="$1"
+shift
+
+case "$cmd" in
+    open|close|status)
+        [[ $# -lt 1 ]] && { echo "Error: client name required" >&2; usage; }
+        "vault_${cmd}" "$1"
+        ;;
+    new)
+        [[ $# -lt 1 ]] && { echo "Error: client name required" >&2; usage; }
+        vault_new "$1" "${2:-500M}"
+        ;;
+    list)
+        vault_list
+        ;;
+    config)
+        vault_config "${1:-show}" "${2:-}" "${3:-}"
+        ;;
+    *)
+        echo "Unknown command: $cmd" >&2
+        usage
+        ;;
+esac
