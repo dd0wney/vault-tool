@@ -7,11 +7,22 @@ DEFAULT_VAULT_DIR="$HOME/.vaults"
 DEFAULT_MOUNT_BASE="/mnt"
 DEFAULT_OP_VAULT="Work"
 
-# Load config file if it exists
+# Load config file safely (no code execution)
 load_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
-        # shellcheck source=/dev/null
-        source "$CONFIG_FILE"
+        while IFS='=' read -r key value; do
+            # Skip comments and empty lines
+            [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+            # Remove quotes from value
+            value="${value#\"}"
+            value="${value%\"}"
+            # Only allow known keys
+            case "$key" in
+                CONFIG_VAULT_DIR)  CONFIG_VAULT_DIR="$value" ;;
+                CONFIG_MOUNT_BASE) CONFIG_MOUNT_BASE="$value" ;;
+                CONFIG_OP_VAULT)   CONFIG_OP_VAULT="$value" ;;
+            esac
+        done < "$CONFIG_FILE"
     fi
 }
 
@@ -20,6 +31,7 @@ load_config
 VAULT_DIR="${VAULT_DIR:-${CONFIG_VAULT_DIR:-$DEFAULT_VAULT_DIR}}"
 MOUNT_BASE="${MOUNT_BASE:-${CONFIG_MOUNT_BASE:-$DEFAULT_MOUNT_BASE}}"
 OP_VAULT="${OP_VAULT:-${CONFIG_OP_VAULT:-$DEFAULT_OP_VAULT}}"
+readonly VAULT_DIR MOUNT_BASE OP_VAULT
 
 usage() {
     cat <<EOF
@@ -87,6 +99,12 @@ vault_open() {
     echo "Opening vault: $CLIENT_LOWER"
     sudo cryptsetup open --token-only "$IMG_PATH" "$MAPPER_NAME"
 
+    # Safe mount point creation (prevent symlink attacks)
+    if [[ -L "$MOUNT_POINT" ]]; then
+        echo "Error: Mount point is a symlink (possible attack)" >&2
+        sudo cryptsetup close "$MAPPER_NAME"
+        exit 1
+    fi
     sudo mkdir -p "$MOUNT_POINT"
     sudo mount "/dev/mapper/${MAPPER_NAME}" "$MOUNT_POINT"
 
@@ -186,18 +204,26 @@ vault_config() {
             # Expand ~ in value
             value="${value/#\~/$HOME}"
 
-            # Create config directory if needed
-            mkdir -p "$(dirname "$CONFIG_FILE")"
-
-            # Update or add the key in config file
-            local config_key="CONFIG_$key"
-            if [[ -f "$CONFIG_FILE" ]] && grep -q "^$config_key=" "$CONFIG_FILE"; then
-                # Update existing key
-                sed -i "s|^$config_key=.*|$config_key=\"$value\"|" "$CONFIG_FILE"
-            else
-                # Add new key
-                echo "$config_key=\"$value\"" >> "$CONFIG_FILE"
+            # Validate value doesn't contain dangerous characters
+            if [[ "$value" =~ [\"\'\`\$] ]]; then
+                echo "Error: Value cannot contain quotes, backticks, or \$" >&2
+                exit 1
             fi
+
+            # Create config directory with restrictive permissions
+            mkdir -p "$(dirname "$CONFIG_FILE")"
+            chmod 700 "$(dirname "$CONFIG_FILE")"
+
+            # Update or add the key in config file (rewrite entire file to avoid sed injection)
+            local config_key="CONFIG_$key"
+            local tmp_file
+            tmp_file=$(mktemp)
+            if [[ -f "$CONFIG_FILE" ]]; then
+                grep -v "^$config_key=" "$CONFIG_FILE" > "$tmp_file" || true
+            fi
+            printf '%s="%s"\n' "$config_key" "$value" >> "$tmp_file"
+            mv "$tmp_file" "$CONFIG_FILE"
+            chmod 600 "$CONFIG_FILE"
 
             echo "Set $key=$value"
             ;;
@@ -243,6 +269,9 @@ vault_new() {
 
     echo "Creating vault: $CLIENT_LOWER ($size)"
     mkdir -p "$VAULT_DIR"
+
+    # Restrictive permissions for vault files
+    umask 077
 
     # Atomic file creation (prevents TOCTOU race)
     if ! ( set -C; : > "$IMG_PATH" ) 2>/dev/null; then
