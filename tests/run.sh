@@ -190,6 +190,20 @@ test_open_refuses_symlinked_mount_point() {
     assert_not_called "mount $MAPPER"
 }
 
+test_open_closes_mapper_when_mount_fails() {
+    : >"$IMG"
+    FAKE_FAIL='mount *' run_vault open "$CLIENT"
+    assert_failed
+    assert_called "cryptsetup close ${CLIENT}-vault"
+}
+
+test_open_keeps_mapper_when_mount_succeeds() {
+    : >"$IMG"
+    run_vault open "$CLIENT"
+    assert_status 0
+    assert_not_called "cryptsetup close"
+}
+
 # --- vault config ---
 
 test_config_set_replaces_key_and_keeps_others() {

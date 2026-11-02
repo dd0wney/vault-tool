@@ -111,7 +111,11 @@ vault_open() {
         sudo cryptsetup close "$MAPPER_NAME"
         exit 1
     fi
-    sudo mount "/dev/mapper/${MAPPER_NAME}" "$MOUNT_POINT"
+    if ! sudo mount "/dev/mapper/${MAPPER_NAME}" "$MOUNT_POINT"; then
+        echo "Error: Failed to mount vault at $MOUNT_POINT" >&2
+        sudo cryptsetup close "$MAPPER_NAME"
+        exit 1
+    fi
 
     echo "Mounted at: $MOUNT_POINT"
 }
