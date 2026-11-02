@@ -125,6 +125,12 @@ test_new_gives_enrolment_the_passphrase_through_a_real_path() {
     assert_called "--unlock-key-file=/dev/stdin"
 }
 
+test_new_keeps_passphrase_out_of_command_arguments() {
+    run_vault new "$CLIENT" 10M
+    assert_status 0
+    assert_not_called "test-passphrase"
+}
+
 test_new_rejects_invalid_client_name() {
     run_vault new '../escape' 10M
     assert_failed
@@ -259,7 +265,12 @@ main() {
 
     for name in $tests; do
         count=$((count + 1))
-        sandbox="$(mktemp -d)"
+        # An empty path would point the fakes at /bin, and a root run would
+        # replace the real commands.
+        if ! sandbox="$(mktemp -d)" || [[ -z "$sandbox" ]]; then
+            echo "Cannot create a sandbox directory" >&2
+            exit 1
+        fi
         if (setup_sandbox "$sandbox"; "$name"); then
             echo "ok   $name"
         else
