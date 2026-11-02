@@ -231,13 +231,13 @@ vault_config() {
             tmp_file=$(mktemp -p "$config_dir")
 
             if [[ -f "$CONFIG_FILE" ]]; then
-                # grep returns 1 if no matches, which is fine; other errors are not
-                if ! grep -v "^$config_key=" "$CONFIG_FILE" > "$tmp_file" 2>/dev/null; then
-                    if [[ $? -gt 1 ]]; then
-                        rm -f "$tmp_file"
-                        echo "Error: Failed to read config file" >&2
-                        exit 1
-                    fi
+                # grep returns 1 if no lines remain, which is fine; other errors are not
+                local grep_status=0
+                grep -v "^$config_key=" "$CONFIG_FILE" > "$tmp_file" 2>/dev/null || grep_status=$?
+                if (( grep_status > 1 )); then
+                    rm -f "$tmp_file"
+                    echo "Error: Failed to read config file" >&2
+                    exit 1
                 fi
             fi
             printf '%s="%s"\n' "$config_key" "$value" >> "$tmp_file"

@@ -222,6 +222,28 @@ test_config_set_replaces_key_and_keeps_others() {
     ! grep -Fq '/old' "$CONFIG" || fail "old value kept"
 }
 
+test_config_set_stops_when_grep_reports_an_error() {
+    mkdir -p "$(dirname "$CONFIG")"
+    printf 'CONFIG_OP_VAULT="Keep"\n' >"$CONFIG"
+    printf '#!/bin/bash\nexit 2\n' >"$SANDBOX/bin/grep"
+    chmod +x "$SANDBOX/bin/grep"
+
+    run_vault config set MOUNT_BASE /new
+
+    assert_failed
+    assert_output_has "Failed to read config file"
+    [[ "$(cat "$CONFIG")" == 'CONFIG_OP_VAULT="Keep"' ]] || fail "config file changed"
+    [[ "$(find "$(dirname "$CONFIG")" -type f | wc -l)" == 1 ]] || fail "temporary file left behind"
+}
+
+test_config_set_accepts_file_with_only_that_key() {
+    mkdir -p "$(dirname "$CONFIG")"
+    printf 'CONFIG_MOUNT_BASE="/old"\n' >"$CONFIG"
+    run_vault config set MOUNT_BASE /new
+    assert_status 0
+    [[ "$(cat "$CONFIG")" == 'CONFIG_MOUNT_BASE="/new"' ]] || fail "value not replaced"
+}
+
 # --- runner ---
 
 main() {
