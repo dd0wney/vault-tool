@@ -271,6 +271,13 @@ vault_new() {
         exit 1
     fi
 
+    # Enrolment is the last step and asks for the Yubikey PIN, so check this first
+    # instead of doing all the work and then rolling it back.
+    if ! ( : </dev/tty ) 2>/dev/null; then
+        echo "Error: 'vault new' must run in a terminal to read the Yubikey PIN" >&2
+        exit 1
+    fi
+
     # Check for 1Password CLI and auth state
     if ! command -v op &>/dev/null; then
         echo "Error: 1Password CLI (op) not found" >&2
@@ -345,7 +352,13 @@ vault_new() {
     sudo cryptsetup close "$MAPPER_NAME"
 
     echo "  Enrolling Yubikey (tap when prompted)..."
-    sudo systemd-cryptenroll "$IMG_PATH" --fido2-device=auto --unlock-key-file=/dev/stdin <<< "$passphrase"
+    # systemd-cryptenroll reads the PIN only when stdin is a terminal, so the
+    # passphrase must arrive on another descriptor. sudo closes descriptors above
+    # stderr, so the shell inside sudo moves the passphrase from stdin to fd 3.
+    sudo sh -c '
+        exec 3<&0 </dev/tty
+        exec systemd-cryptenroll "$1" --fido2-device=auto --unlock-key-file=/dev/fd/3
+    ' -- "$IMG_PATH" <<< "$passphrase"
 
     # Clear passphrase from memory
     unset passphrase

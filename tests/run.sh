@@ -35,18 +35,38 @@ setup_sandbox() {
     mkdir -p "$SANDBOX"/{bin,home,vaults,mnt,config}
 
     local name
-    for name in op cryptsetup mount umount mkfs.ext4 systemd-cryptenroll; do
+    for name in op cryptsetup mount umount mkfs.ext4; do
         make_fake "$name"
     done
 
     # The fake runs the command, so `sudo cryptsetup` reaches the fake cryptsetup
-    # and `sudo sh -c` really creates the mount point inside the sandbox.
+    # and `sudo sh -c` really creates the mount point inside the sandbox. Like
+    # the real sudo, it closes descriptors above stderr.
     cat >"$SANDBOX/bin/sudo" <<'EOF'
 #!/bin/bash
 printf 'sudo %s\n' "$*" >>"$FAKE_LOG"
-exec "$@"
+exec "$@" 3<&-
 EOF
     chmod +x "$SANDBOX/bin/sudo"
+
+    # Mirrors the two limits of the real tool that argument checks cannot show:
+    # the PIN needs a terminal on stdin, and "-" is a file name, not stdin.
+    cat >"$SANDBOX/bin/systemd-cryptenroll" <<'EOF'
+#!/bin/bash
+printf 'systemd-cryptenroll %s\n' "$*" >>"$FAKE_LOG"
+case "systemd-cryptenroll $*" in
+    ${FAKE_FAIL:-__no_failure__}) exit 1 ;;
+esac
+[[ -t 0 ]] || { echo "Failed to acquire user PIN: Permission denied" >&2; exit 1; }
+for arg in "$@"; do
+    [[ "$arg" == --unlock-key-file=* ]] && key_file="${arg#*=}"
+done
+[[ "$(cat -- "${key_file:-/nonexistent}" 2>/dev/null)" == test-passphrase ]] || {
+    echo "Reading keyfile failed" >&2
+    exit 1
+}
+EOF
+    chmod +x "$SANDBOX/bin/systemd-cryptenroll"
 
     export FAKE_LOG="$SANDBOX/calls.log"
     export HOME="$SANDBOX/home"
@@ -61,7 +81,14 @@ EOF
 
 run_vault() {
     VAULT_STATUS=0
-    PATH="$SANDBOX/bin:$PATH" "$VAULT" "$@" >"$SANDBOX/output" 2>&1 || VAULT_STATUS=$?
+    PATH="$SANDBOX/bin:$PATH" python3 "$ROOT/tests/with_pty.py" "$VAULT" "$@" \
+        >"$SANDBOX/output" 2>&1 || VAULT_STATUS=$?
+}
+
+run_vault_without_terminal() {
+    VAULT_STATUS=0
+    PATH="$SANDBOX/bin:$PATH" setsid --wait "$VAULT" "$@" \
+        </dev/null >"$SANDBOX/output" 2>&1 || VAULT_STATUS=$?
 }
 
 fail() {
@@ -118,11 +145,18 @@ test_new_makes_user_the_owner_of_the_file_system() {
     assert_called "mkfs.ext4 -q -E root_owner=$(id -u):$(id -g) $MAPPER"
 }
 
-test_new_gives_enrolment_the_passphrase_through_a_real_path() {
-    # systemd-cryptenroll treats --unlock-key-file=- as a file named "-".
+test_new_enrols_with_terminal_for_pin_and_passphrase_on_a_file() {
     run_vault new "$CLIENT" 10M
     assert_status 0
-    assert_called "--unlock-key-file=/dev/stdin"
+    assert_called "systemd-cryptenroll $IMG"
+}
+
+test_new_stops_before_any_change_without_a_terminal() {
+    run_vault_without_terminal new "$CLIENT" 10M
+    assert_failed
+    assert_output_has "terminal"
+    assert_missing "$IMG"
+    assert_not_called "op item create"
 }
 
 test_new_keeps_passphrase_out_of_command_arguments() {

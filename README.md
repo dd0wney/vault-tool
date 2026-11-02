@@ -55,8 +55,8 @@ This will:
 3. Create and format the LUKS container
 4. Enroll your Yubikey
 
-Requires: 1Password CLI (`op`) authenticated. If any step fails, `vault new`
-removes the image and the 1Password item.
+Requires: 1Password CLI (`op`) authenticated, and a terminal for the Yubikey PIN.
+If any step fails, `vault new` removes the image and the 1Password item.
 
 A vault that an older version created has a top directory owned by root. To
 write to it without sudo, open it and run:
@@ -89,10 +89,10 @@ the paths if you changed the configuration.
 tests/run.sh
 ```
 
-The tests need no root, Yubikey, or 1Password account, because fake commands on
-`PATH` replace `sudo`, `cryptsetup`, `op`, and the other system tools. They
-therefore do not prove that the real tools accept the arguments. Use the manual
-test for that.
+The tests need `python3` and `setsid`, but no root, Yubikey, or 1Password account,
+because fake commands on `PATH` replace `sudo`, `cryptsetup`, `op`, and the other
+system tools. They therefore do not prove that the real tools accept the
+arguments. Use the manual test for that.
 
 ## Manual test
 
