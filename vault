@@ -345,7 +345,8 @@ vault_new() {
     sudo cryptsetup open "$IMG_PATH" "$MAPPER_NAME" --key-file=- <<< "$passphrase"
 
     echo "  Creating ext4 filesystem..."
-    sudo mkfs.ext4 -q "/dev/mapper/${MAPPER_NAME}"
+    # Without root_owner, sudo leaves the top directory owned by root.
+    sudo mkfs.ext4 -q -E "root_owner=$(id -u):$(id -g)" "/dev/mapper/${MAPPER_NAME}"
 
     echo "  Closing container..."
     sudo cryptsetup close "$MAPPER_NAME"

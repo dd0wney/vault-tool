@@ -112,6 +112,12 @@ test_new_creates_private_image_and_enrols_yubikey() {
     assert_called "systemd-cryptenroll $IMG"
 }
 
+test_new_makes_user_the_owner_of_the_file_system() {
+    run_vault new "$CLIENT" 10M
+    assert_status 0
+    assert_called "mkfs.ext4 -q -E root_owner=$(id -u):$(id -g) $MAPPER"
+}
+
 test_new_rejects_invalid_client_name() {
     run_vault new '../escape' 10M
     assert_failed
