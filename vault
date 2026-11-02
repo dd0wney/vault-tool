@@ -249,6 +249,20 @@ vault_config() {
     esac
 }
 
+# Global, not local: after a `set -e` abort the EXIT trap runs outside the
+# function scope, so a local in vault_new would read as unset here and the
+# 1Password item would stay behind.
+OP_ITEM_CREATED=false
+
+cleanup_failed_new() {
+    echo "  Cleaning up after failure..." >&2
+    [[ -e "/dev/mapper/${MAPPER_NAME}" ]] && sudo cryptsetup close "$MAPPER_NAME" 2>/dev/null || true
+    rm -f "$IMG_PATH"
+    if [[ "$OP_ITEM_CREATED" == "true" ]] && ! op item delete "${CLIENT_LOWER}-vault-recovery" --vault="$OP_VAULT"; then
+        echo "Warning: Remove 1Password item ${CLIENT_LOWER}-vault-recovery manually" >&2
+    fi
+}
+
 vault_new() {
     local client="$1"
     local size="${2:-500M}"
@@ -294,16 +308,9 @@ vault_new() {
         exit 1
     fi
 
-    # Cleanup trap for failed operations
-    local op_item_created=false
-    cleanup() {
-        echo "  Cleaning up after failure..." >&2
-        unset passphrase 2>/dev/null || true
-        [[ -e "/dev/mapper/${MAPPER_NAME}" ]] && sudo cryptsetup close "$MAPPER_NAME" 2>/dev/null || true
-        [[ -f "$IMG_PATH" ]] && rm -f "$IMG_PATH"
-        [[ "$op_item_created" == "true" ]] && op item delete "${CLIENT_LOWER}-vault-recovery" --vault="$OP_VAULT" 2>/dev/null || true
-    }
-    trap cleanup ERR
+    # EXIT, not ERR: an ERR trap misses the explicit `exit 1` paths below. Set only
+    # now, so that a failure above cannot remove a vault that already existed.
+    trap cleanup_failed_new EXIT
 
     # Generate passphrase in 1Password (never touches command args)
     echo "  Creating recovery passphrase in 1Password (vault: $OP_VAULT)..."
@@ -317,7 +324,7 @@ vault_new() {
         echo "Error: Failed to create passphrase in 1Password" >&2
         exit 1
     fi
-    op_item_created=true
+    OP_ITEM_CREATED=true
 
     # Read passphrase back securely
     echo "  Retrieving passphrase..."
@@ -344,7 +351,7 @@ vault_new() {
 
     # Clear passphrase from memory
     unset passphrase
-    trap - ERR
+    trap - EXIT
 
     echo ""
     echo "Vault '$CLIENT_LOWER' created successfully"

@@ -20,6 +20,7 @@ make_fake() {
     local name="$1"
     cat >"$SANDBOX/bin/$name" <<EOF
 #!/bin/bash
+shopt -s extglob
 printf '%s\n' "$name \$*" >>"\$FAKE_LOG"
 case "$name \$*" in
     \${FAKE_FAIL:-__no_failure__}) exit 1 ;;
@@ -116,6 +117,58 @@ test_new_rejects_invalid_client_name() {
     assert_failed
     assert_output_has "Invalid client name"
     assert_not_called "op item create"
+}
+
+test_new_removes_image_when_op_item_create_fails() {
+    FAKE_FAIL='op item create*' run_vault new "$CLIENT" 10M
+    assert_failed
+    assert_missing "$IMG"
+    assert_not_called "op item delete"
+}
+
+test_new_can_retry_after_op_item_create_fails() {
+    FAKE_FAIL='op item create*' run_vault new "$CLIENT" 10M
+    run_vault new "$CLIENT" 10M
+    assert_status 0
+    assert_exists "$IMG"
+}
+
+test_new_removes_image_and_op_item_when_luks_format_fails() {
+    FAKE_FAIL='cryptsetup luksFormat*' run_vault new "$CLIENT" 10M
+    assert_failed
+    assert_missing "$IMG"
+    assert_called "op item delete ${CLIENT}-vault-recovery"
+}
+
+test_new_removes_image_and_op_item_when_enrolment_fails() {
+    FAKE_FAIL='systemd-cryptenroll*' run_vault new "$CLIENT" 10M
+    assert_failed
+    assert_missing "$IMG"
+    assert_called "op item delete ${CLIENT}-vault-recovery"
+}
+
+test_new_warns_when_op_item_cannot_be_removed() {
+    FAKE_FAIL='@(cryptsetup luksFormat*|op item delete*)' run_vault new "$CLIENT" 10M
+    assert_failed
+    assert_output_has "${CLIENT}-vault-recovery"
+    assert_output_has "Warning"
+}
+
+test_new_leaves_existing_vault_untouched() {
+    echo existing-data >"$IMG"
+    run_vault new "$CLIENT" 10M
+    assert_failed
+    assert_output_has "already exists"
+    [[ "$(cat "$IMG")" == existing-data ]] || fail "existing vault was changed"
+    assert_not_called "op item"
+}
+
+test_new_keeps_everything_on_success() {
+    run_vault new "$CLIENT" 10M
+    assert_status 0
+    assert_exists "$IMG"
+    assert_not_called "op item delete"
+    ! grep -Fq "Cleaning up" "$SANDBOX/output" || fail "cleanup ran after success"
 }
 
 # --- vault open ---
