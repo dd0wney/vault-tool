@@ -345,7 +345,7 @@ vault_new() {
     sudo cryptsetup close "$MAPPER_NAME"
 
     echo "  Enrolling Yubikey (tap when prompted)..."
-    sudo systemd-cryptenroll "$IMG_PATH" --fido2-device=auto --unlock-key-file=- <<< "$passphrase"
+    sudo systemd-cryptenroll "$IMG_PATH" --fido2-device=auto --unlock-key-file=/dev/stdin <<< "$passphrase"
 
     # Clear passphrase from memory
     unset passphrase

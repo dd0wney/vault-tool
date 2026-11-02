@@ -118,6 +118,13 @@ test_new_makes_user_the_owner_of_the_file_system() {
     assert_called "mkfs.ext4 -q -E root_owner=$(id -u):$(id -g) $MAPPER"
 }
 
+test_new_gives_enrolment_the_passphrase_through_a_real_path() {
+    # systemd-cryptenroll treats --unlock-key-file=- as a file named "-".
+    run_vault new "$CLIENT" 10M
+    assert_status 0
+    assert_called "--unlock-key-file=/dev/stdin"
+}
+
 test_new_rejects_invalid_client_name() {
     run_vault new '../escape' 10M
     assert_failed
